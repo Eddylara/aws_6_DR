@@ -1,0 +1,11 @@
+# Copia este archivo a terraform.tfvars y llena los valores
+# NUNCA comitees terraform.tfvars con valores reales
+
+db_password = "TU_PASSWORD_SEGURO_AQUI"
+
+# Opcional: sobreescribe bucket names si quieres nombres únicos
+# source_bucket_name      = "bucket-dr-source-TUCOMPANIA-FECHA"
+# destination_bucket_name = "bucket-dr-destination-TUCOMPANIA-FECHA"
+
+# Opcional: sobreescribe tabla DynamoDB
+# dynamodb_table_name = "usuarios"
