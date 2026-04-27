@@ -75,7 +75,7 @@ resource "aws_db_instance" "primary_mysql" {
   vpc_security_group_ids = [aws_security_group.primary_rds_sg.id]
   backup_retention_period = 1
   skip_final_snapshot    = true
-  publicly_accessible    = false
+  publicly_accessible    = true
 }
 
 resource "aws_db_instance" "secondary_read_replica" {
@@ -85,7 +85,7 @@ resource "aws_db_instance" "secondary_read_replica" {
   replicate_source_db    = aws_db_instance.primary_mysql.arn
   db_subnet_group_name   = aws_db_subnet_group.secondary.name
   vpc_security_group_ids = [aws_security_group.secondary_rds_sg.id]
-  publicly_accessible    = false
+  publicly_accessible    = true
   skip_final_snapshot    = true
 
   depends_on = [aws_db_instance.primary_mysql]
