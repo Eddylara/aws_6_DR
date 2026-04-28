@@ -34,6 +34,10 @@ resource "aws_launch_template" "lt" {
   instance_type          = "t3.micro"
   vpc_security_group_ids = [aws_security_group.ec2_sg.id]
 
+  iam_instance_profile {
+    arn = aws_iam_instance_profile.ec2_profile.arn
+  }
+
   user_data = base64encode(templatefile("${path.module}/user_data.sh.tftpl", {
     db_host     = var.db_host
     db_name     = var.db_name

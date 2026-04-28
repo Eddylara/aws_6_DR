@@ -133,3 +133,24 @@ module "dynamodb" {
   table_name       = var.dynamodb_table_name
   secondary_region = var.secondary_region
 }
+
+module "route53" {
+  source = "./modules/route53"
+
+  primary_alb_dns   = module.alb_primary.alb_dns_name
+  secondary_alb_dns = module.alb_secondary.alb_dns_name
+}
+
+
+module "cloudwatch" {
+  source = "./modules/cloudwatch"
+
+  providers = {
+    aws.secondary = aws.secondary
+  }
+
+  primary_alb_arn_suffix   = module.alb_primary.alb_arn_suffix
+  primary_tg_arn_suffix    = module.alb_primary.target_group_arn_suffix
+  secondary_alb_arn_suffix = module.alb_secondary.alb_arn_suffix
+  secondary_tg_arn_suffix  = module.alb_secondary.target_group_arn_suffix
+}

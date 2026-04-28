@@ -73,7 +73,10 @@ def health():
 def list_personas():
     connection = get_connection()
     with connection:
-        ensure_table(connection)
+        try:
+            ensure_table(connection)
+        except Exception:
+            pass
         with connection.cursor() as cursor:
             cursor.execute("SELECT id, nombre, edad FROM personas ORDER BY id")
             rows = cursor.fetchall()
@@ -92,7 +95,10 @@ def create_persona():
 
     connection = get_connection()
     with connection:
-        ensure_table(connection)
+        try:
+            ensure_table(connection)
+        except Exception:
+            pass
         with connection.cursor() as cursor:
             if persona_id is None:
                 cursor.execute(
@@ -121,7 +127,10 @@ def update_persona(persona_id):
 
     connection = get_connection()
     with connection:
-        ensure_table(connection)
+        try:
+            ensure_table(connection)
+        except Exception:
+            pass
         with connection.cursor() as cursor:
             cursor.execute(
                 "UPDATE personas SET nombre = %s, edad = %s WHERE id = %s",
@@ -137,7 +146,10 @@ def update_persona(persona_id):
 def delete_persona(persona_id):
     connection = get_connection()
     with connection:
-        ensure_table(connection)
+        try:
+            ensure_table(connection)
+        except Exception:
+            pass
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM personas WHERE id = %s", (persona_id,))
             if cursor.rowcount == 0:
