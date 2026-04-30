@@ -2,7 +2,7 @@
 
 Infraestructura Terraform multi-región para **Disaster Recovery** con app CRUD de personas (Flask + Nginx + MySQL).
 
-## 🏗️ Arquitectura
+## Arquitectura
 
 - **Región primaria** (`us-east-1`): VPC, ALB, ASG (2 instancias), RDS Multi-AZ, S3 bucket origen, DynamoDB.
 - **Región secundaria** (`us-west-2`): VPC espejo, ALB, ASG standby (desired=0), RDS read replica, S3 replica CRR, DynamoDB Global Table.
@@ -64,7 +64,7 @@ Tu usuario/role debe tener permisos sobre:
 
 ---
 
-## 🔧 Variables necesarias
+## Variables necesarias
 
 ### Obligatorias (DEBES especificar)
 
@@ -115,7 +115,7 @@ terraform apply -var="db_password=MiPassword123!"
 
 ---
 
-## �🚀 Quick Start
+## Quick Start
 
 ### 1. Clonar y preparar
 ```bash
@@ -127,7 +127,7 @@ cd proyecto_6_ddr5
 
 **Elige UNA opción:**
 
-#### A) Script interactivo (más fácil) ⭐
+#### A) Script interactivo (más fácil)
 ```bash
 chmod +x setup-env.sh
 ./setup-env.sh
@@ -152,7 +152,7 @@ export TF_VAR_source_bucket_name="bucket-dr-source-TUEMPRESA-$(date +%s)"
 export TF_VAR_destination_bucket_name="bucket-dr-destination-TUEMPRESA-$(date +%s)"
 ```
 
-**⚠️ IMPORTANTE:**
+**IMPORTANTE:**
 - `terraform.tfvars` NO se sube a Git (credenciales).
 - El archivo se ignora automáticamente (`.gitignore`).
 - Usa `terraform.tfvars.example` como plantilla.
@@ -197,7 +197,7 @@ terraform output rds_primary_endpoint # BD primaria
 terraform output s3_source_bucket     # S3 origen
 ```
 
-### ⏱️ Tiempo estimado
+### Tiempo estimado
 - `terraform init`: 2-3 min (primera vez).
 - `terraform plan`: 1-2 min.
 - `terraform apply`: **15-20 min** (RDS tarda mucho).
@@ -205,7 +205,7 @@ terraform output s3_source_bucket     # S3 origen
   - RDS Multi-AZ: 10-15 min.
   - EC2 user-data (Flask): 3-5 min.
 
-### 💰 Costos estimados (AWS Free Tier insuficiente)
+### Costos estimados (AWS Free Tier insuficiente)
 | Recurso | Cantidad | Costo/mes (aprox) |
 |---------|----------|-------------------|
 | EC2 (t3.micro) | 2-4 | $10-20 |
@@ -220,7 +220,7 @@ Para **detener costos**: `terraform destroy` (elimina todo).
 
 ---
 
-## 🧪 Pruebas
+## Pruebas
 
 ### Primaria (us-east-1)
 ```bash
@@ -260,41 +260,84 @@ aws s3 ls s3://bucket-dr-destination-* --recursive
 
 ---
 
-## 🔄 Failover a Secundaria
+## Failover a Secundaria
 
-### Escalable (temporal):
+### 4.3 Route 53 Failover
+
+- **Health Check**: HTTP check al ALB primario en `/health`, cada 10 segundos, umbral 2 fallos.
+- **Record Set Primary**: `PRIMARY` apuntando al ALB de `us-east-1`.
+- **Record Set Secondary**: `SECONDARY` apuntando al ALB de `us-west-2`.
+- **SNS Alerta**: alertas por CloudWatch cuando el health check entra/sale de estado `ALARM`.
+
+Terraform ya crea estos recursos en [modules/route53/main.tf](modules/route53/main.tf) y los conecta con el topic SNS de [modules/cloudwatch/main.tf](modules/cloudwatch/main.tf).
+
+### 4.4 Runbook de Failover
+
+#### Objetivo
+Promover la réplica de base de datos en `us-west-2`, activar la capa de aplicación secundaria y dejar que Route 53 dirija tráfico al destino saludable.
+
+#### Procedimiento de failover
+1. Confirmar que la región primaria no responde correctamente en `/health`.
+2. El sistema ejecuta automáticamente la **Lambda de failover** cuando Route 53 / CloudWatch entra en `ALARM`.
+3. Si necesitas una intervención manual, ejecutar [failover.sh](failover.sh) para:
+  - promover la read replica en `us-west-2`,
+  - bajar el ASG primario (best-effort),
+  - escalar el ASG secundario,
+  - validar instancias y `/health` del ALB secundario,
+  - reportar el endpoint writer activo en secundaria.
+4. Verificar el DNS de aplicación con `terraform output app_dns`.
+5. Confirmar que Route 53 cambió el tráfico al alias secundario.
+6. Corroborar la conectividad de la app y la base de datos.
+
+#### Procedimiento de failback
+1. Validar que la región primaria esté recuperada.
+2. Ejecutar [failback.sh](failback.sh):
+  - verifica salud del ALB primario,
+  - crea una nueva DB en `us-east-1` como réplica de la DB activa en `us-west-2`,
+  - espera sincronización y la promueve para volver a dejar `us-east-1` como primaria,
+  - recrea la réplica en `us-west-2` desde la nueva primaria,
+  - sube ASG primario y baja ASG secundario.
+3. Revalidar `/health`, CRUD y sincronización de datos.
+
+#### Simulación de fallo
+- Recomendado: usar AWS Fault Injection Simulator (FIS) para detener instancias o forzar degradación en `us-east-1`.
+- Objetivo: comprobar que Route 53, el ASG secundario y los alarms SNS reaccionan como se espera.
+
+### Failover automático
+- Route 53 detecta la caída del ALB primario con el health check.
+- CloudWatch envía la alarma a SNS.
+- La Lambda de failover automatiza la promoción de la réplica RDS y el escalado del ASG secundario.
+- Los scripts [failover.sh](failover.sh) y [failback.sh](failback.sh) quedan como runbook y respaldo manual.
+
+### AWS Fault Injection Simulator (FIS)
+
+Para probar el DR completo, FIS se usa para provocar una falla controlada en la región primaria.
+
+#### Opción 1: desde la consola AWS
+1. Abrir Fault Injection Simulator.
+2. Ir a Experiment templates y crear una plantilla nueva.
+3. Definir el objetivo como las instancias del ASG primario.
+4. Elegir una acción de fallo, por ejemplo:
+  - `aws:ec2:stop-instances`
+  - `aws:autoscaling:terminate-instance-in-auto-scaling-group`
+5. Configurar duración de 5 a 10 minutos.
+6. Ejecutar el experimento.
+7. Validar los resultados:
+  - Route 53 marca el health check primario como unhealthy.
+  - SNS envía la alerta.
+  - La Lambda de failover promueve la réplica y activa el ASG secundario.
+  - `terraform output app_dns` responde desde la región secundaria.
+
+#### Opción 2: ejecución de una plantilla existente
+Si ya existe una plantilla en FIS, el experimento se lanza con:
+
 ```bash
-# Activar ASG secundario
-aws autoscaling set-desired-capacity \
-  --auto-scaling-group-name secondary-asg-dr \
-  --desired-capacity 2 \
-  --region us-west-2
-
-# Esperar 3-5 min a que instancias estén healthy
-aws autoscaling describe-auto-scaling-groups \
-  --auto-scaling-group-names secondary-asg-dr \
-  --region us-west-2 \
-  --query 'AutoScalingGroups[0].Instances[*].[InstanceId,HealthStatus]'
-
-# Probar ALB secundario
-ALB_SEC=$(terraform output -raw secondary_alb_dns)
-curl http://$ALB_SEC/  
-```
-
-### Promoción de DB (no reversible - usar en emergencia):
-```bash
-# Promover read replica a instance writable
-aws rds promote-read-replica \
-  --db-instance-identifier db-dr-secondary-replica \
-  --region us-west-2
-
-# ADVERTENCIA: Después de esto, primaria y secundaria no estarán sincronizadas
-# Necesitarás runbook de recuperación manual
+aws fis start-experiment --experiment-template-id <template-id>
 ```
 
 ---
 
-## 📁 Estructura
+## Estructura
 
 ```
 .
@@ -302,8 +345,8 @@ aws rds promote-read-replica \
 ├── provider.tf             # Providers AWS (primary/secondary)
 ├── variables.tf            # Variables (región, CIDR, credenciales)
 ├── outputs.tf              # Outputs (ALB, RDS endpoints)
-├── terraform.tfvars        # ❌ NO SUBIR (credenciales)
-├── terraform.tfvars.example # ✅ Plantilla para compañeros
+├── terraform.tfvars        # NO SUBIR (credenciales)
+├── terraform.tfvars.example # Plantilla para compañeros
 ├── .gitignore              # Archivos ignorados
 ├── setup-env.sh            # Script de setup interactivo
 ├── SETUP.md                # Esta guía
@@ -323,68 +366,3 @@ aws rds promote-read-replica \
 
 ---
 
-## 🔐 Seguridad
-
-- ✅ Credenciales en `terraform.tfvars` (excluido de Git).
-- ✅ Variables de ambiente para CI/CD.
-- ✅ Security Groups restrictivos por capa (ALB, EC2, RDS).
-- ✅ Nginx proxy en EC2 (no expone Flask directamente).
-- ✅ RDS no públicamente accesible.
-
-**NO dataría credenciales en plaintext en repos públicos.** Usa AWS Secrets Manager o HashiCorp Vault en producción.
-
----
-
-## 📋 Checklist de validación
-
-- [ ] Terraform apply exitoso sin errores.
-- [ ] Primaria: ALB accesible, 2 EC2 saludables.
-- [ ] Secundaria: RDS read replica lag < 100ms.
-- [ ] S3: Archivo en origen aparece en destino (< 15 min).
-- [ ] DynamoDB: Tabla global visible en ambas regiones.
-- [ ] CRUD: POST/GET/PUT/DELETE funciona.
-
----
-
-## 🛠️ Troubleshooting
-
-### EC2 no levanta
-```bash
-# Revisar user data
-aws ec2 describe-instances --region us-east-1 \
-  --query 'Reservations[0].Instances[0].{ID:InstanceId,State:State.Name,LaunchTime:LaunchTime}'
-
-# Logs en instancia
-# /var/log/cloud-init-output.log
-```
-
-### RDS replica lag alto
-```bash
-aws rds describe-db-instances --db-instance-identifier db-dr-secondary-replica \
-  --region us-west-2 \
-  --query 'DBInstances[0].{Endpoint:Endpoint.Address,Status:DBInstanceStatus,ReplicationLag:LatestRestorableTime}'
-```
-
-### S3 CRR lento
-```bash
-# Ver regla de replicación
-aws s3api get-bucket-replication --bucket bucket-dr-source-* \
-  --region us-east-1
-```
-
----
-
-## 📝 To-Do
-- [ ] Agregar Route53 para DNS multi-región.
-- [ ] Agregar script automático de failover.
-- [ ] Agregar CloudWatch alarms.
-- [ ] Agregar Lambda para orquestación.
-
----
-
-## 📧 Soporte
-Contacta al equipo DevOps si hay issues.
-
----
-
-**Última actualización**: 27 Abril 2026

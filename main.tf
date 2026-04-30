@@ -134,18 +134,11 @@ module "dynamodb" {
   secondary_region = var.secondary_region
 }
 
-module "route53" {
-  source = "./modules/route53"
-
-  primary_alb_dns   = module.alb_primary.alb_dns_name
-  secondary_alb_dns = module.alb_secondary.alb_dns_name
-}
-
-
 module "cloudwatch" {
   source = "./modules/cloudwatch"
 
   providers = {
+    aws           = aws.primary
     aws.secondary = aws.secondary
   }
 
@@ -153,4 +146,30 @@ module "cloudwatch" {
   primary_tg_arn_suffix    = module.alb_primary.target_group_arn_suffix
   secondary_alb_arn_suffix = module.alb_secondary.alb_arn_suffix
   secondary_tg_arn_suffix  = module.alb_secondary.target_group_arn_suffix
+}
+
+module "route53" {
+  source = "./modules/route53"
+
+  providers = {
+    aws = aws.primary
+  }
+
+  primary_alb_dns   = module.alb_primary.alb_dns_name
+  secondary_alb_dns = module.alb_secondary.alb_dns_name
+  sns_topic_arn     = module.cloudwatch.sns_topic_arn
+}
+
+module "failover_automation" {
+  source = "./modules/failover_automation"
+
+  providers = {
+    aws = aws.primary
+  }
+
+  sns_topic_arn            = module.cloudwatch.sns_topic_arn
+  primary_health_alarm_name = module.route53.primary_health_check_alarm_name
+  secondary_region         = var.secondary_region
+  secondary_asg_name       = module.ec2_asg_secondary.asg_name
+  secondary_rds_identifier = module.rds.secondary_replica_identifier
 }
