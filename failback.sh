@@ -14,6 +14,36 @@ SECONDARY_DB_SUBNET_GROUP="${SECONDARY_DB_SUBNET_GROUP:-db-subnet-secondary}"
 PRIMARY_DB_INSTANCE_CLASS="${PRIMARY_DB_INSTANCE_CLASS:-db.t3.micro}"
 SECONDARY_DB_INSTANCE_CLASS="${SECONDARY_DB_INSTANCE_CLASS:-db.t3.micro}"
 
+wait_for_rds_ready() {
+  local region="$1"
+  local identifier="$2"
+
+  echo "Esperando que ${identifier} en ${region} esté completamente lista..."
+
+  while true; do
+    STATUS=$(aws rds describe-db-instances \
+      --region "$region" \
+      --db-instance-identifier "$identifier" \
+      --query 'DBInstances[0].DBInstanceStatus' \
+      --output text)
+
+    PENDING=$(aws rds describe-db-instances \
+      --region "$region" \
+      --db-instance-identifier "$identifier" \
+      --query 'DBInstances[0].PendingModifiedValues' \
+      --output json)
+
+    echo "Estado actual: $STATUS | PendingModifiedValues: $PENDING"
+
+    if [[ "$STATUS" == "available" && "$PENDING" == "{}" ]]; then
+      echo "${identifier} está completamente estable."
+      break
+    fi
+
+    sleep 30
+  done
+}
+
 delete_db_if_exists() {
   local region="$1"
   local identifier="$2"
@@ -34,16 +64,17 @@ delete_db_if_exists() {
 
 resolve_sg_id() {
   local region="$1"
-  local default_group_name="$2"
+  local group_name="$2"
   local sg_id
 
   sg_id=$(aws ec2 describe-security-groups \
     --region "$region" \
-    --filters "Name=group-name,Values=${default_group_name}" \
+    --filters "Name=group-name,Values=${group_name}" \
     --query 'SecurityGroups[0].GroupId' \
     --output text)
 
   if [[ "$sg_id" == "None" || -z "$sg_id" ]]; then
+    echo "No se pudo resolver SG ${group_name} en ${region}." >&2
     return 1
   fi
 
@@ -55,7 +86,7 @@ echo "Iniciando failback a región primaria (${PRIMARY_REGION})..."
 echo "Verificando salud de la región primaria..."
 curl -fsS "http://${PRIMARY_ALB}/health" >/dev/null
 
-echo "Verificando que la DB actual en secundaria esté disponible..."
+echo "Esperando que la DB secundaria esté disponible..."
 aws rds wait db-instance-available \
   --db-instance-identifier "$SECONDARY_RDS_ID" \
   --region "$SECONDARY_REGION"
@@ -71,25 +102,13 @@ if [[ "$SECONDARY_DB_ARN" == "None" || -z "$SECONDARY_DB_ARN" ]]; then
   exit 1
 fi
 
-PRIMARY_SG_ID="${PRIMARY_DB_SECURITY_GROUP_ID:-}"
-if [[ -z "$PRIMARY_SG_ID" ]]; then
-  PRIMARY_SG_ID=$(resolve_sg_id "$PRIMARY_REGION" "primary-rds-sg") || {
-    echo "No se pudo resolver SG primario automáticamente. Define PRIMARY_DB_SECURITY_GROUP_ID." >&2
-    exit 1
-  }
-fi
+PRIMARY_SG_ID=$(resolve_sg_id "$PRIMARY_REGION" "primary-rds-sg") || exit 1
+SECONDARY_SG_ID=$(resolve_sg_id "$SECONDARY_REGION" "secondary-rds-sg") || exit 1
 
-SECONDARY_SG_ID="${SECONDARY_DB_SECURITY_GROUP_ID:-}"
-if [[ -z "$SECONDARY_SG_ID" ]]; then
-  SECONDARY_SG_ID=$(resolve_sg_id "$SECONDARY_REGION" "secondary-rds-sg") || {
-    echo "No se pudo resolver SG secundario automáticamente. Define SECONDARY_DB_SECURITY_GROUP_ID." >&2
-    exit 1
-  }
-fi
-
+echo "Eliminando antigua primaria si existe..."
 delete_db_if_exists "$PRIMARY_REGION" "$PRIMARY_RDS_ID"
 
-echo "Creando nueva DB primaria en ${PRIMARY_REGION} como réplica de ${SECONDARY_RDS_ID} (${SECONDARY_REGION})..."
+echo "Creando nueva primaria en ${PRIMARY_REGION} desde réplica secundaria..."
 aws rds create-db-instance-read-replica \
   --region "$PRIMARY_REGION" \
   --db-instance-identifier "$PRIMARY_RDS_ID" \
@@ -99,20 +118,18 @@ aws rds create-db-instance-read-replica \
   --vpc-security-group-ids "$PRIMARY_SG_ID" \
   --publicly-accessible >/dev/null
 
-echo "Esperando sincronización inicial de la nueva DB primaria..."
+echo "Esperando sincronización inicial..."
 aws rds wait db-instance-available \
-  --db-instance-identifier "$PRIMARY_RDS_ID" \
-  --region "$PRIMARY_REGION"
+  --region "$PRIMARY_REGION" \
+  --db-instance-identifier "$PRIMARY_RDS_ID"
 
-echo "Promoviendo DB de ${PRIMARY_REGION} para volverla primaria..."
+echo "Promoviendo nueva primaria..."
 aws rds promote-read-replica \
   --region "$PRIMARY_REGION" \
   --db-instance-identifier "$PRIMARY_RDS_ID" >/dev/null
 
-echo "Esperando a que la nueva DB primaria quede disponible tras la promoción..."
-aws rds wait db-instance-available \
-  --db-instance-identifier "$PRIMARY_RDS_ID" \
-  --region "$PRIMARY_REGION"
+echo "Esperando estabilización completa después de promoción..."
+wait_for_rds_ready "$PRIMARY_REGION" "$PRIMARY_RDS_ID"
 
 PRIMARY_DB_ARN=$(aws rds describe-db-instances \
   --region "$PRIMARY_REGION" \
@@ -125,9 +142,10 @@ if [[ "$PRIMARY_DB_ARN" == "None" || -z "$PRIMARY_DB_ARN" ]]; then
   exit 1
 fi
 
+echo "Eliminando réplica vieja en secundaria..."
 delete_db_if_exists "$SECONDARY_REGION" "$SECONDARY_RDS_ID"
 
-echo "Recreando réplica en ${SECONDARY_REGION} desde la nueva primaria..."
+echo "Recreando réplica secundaria desde la nueva primaria..."
 aws rds create-db-instance-read-replica \
   --region "$SECONDARY_REGION" \
   --db-instance-identifier "$SECONDARY_RDS_ID" \
@@ -137,23 +155,21 @@ aws rds create-db-instance-read-replica \
   --vpc-security-group-ids "$SECONDARY_SG_ID" \
   --publicly-accessible >/dev/null
 
-echo "Esperando a que la réplica secundaria esté disponible y sincronizando..."
-aws rds wait db-instance-available \
-  --db-instance-identifier "$SECONDARY_RDS_ID" \
-  --region "$SECONDARY_REGION"
+echo "Esperando que la nueva réplica secundaria esté lista..."
+wait_for_rds_ready "$SECONDARY_REGION" "$SECONDARY_RDS_ID"
 
-echo "Aumentando capacidad de la región primaria..."
+echo "Escalando región primaria..."
 aws autoscaling set-desired-capacity \
   --auto-scaling-group-name "$PRIMARY_ASG" \
   --desired-capacity 2 \
   --region "$PRIMARY_REGION"
 
-echo "Reduciendo capacidad de la región secundaria..."
+echo "Reduciendo región secundaria..."
 aws autoscaling set-desired-capacity \
   --auto-scaling-group-name "$SECONDARY_ASG" \
   --desired-capacity 0 \
   --region "$SECONDARY_REGION"
 
-echo "Failback completado con DB primaria nuevamente en ${PRIMARY_REGION}."
-echo "DNS de aplicación: $APP_DNS"
-echo "ALB primario directo: http://$PRIMARY_ALB"
+echo "Failback completado correctamente."
+echo "DNS aplicación: $APP_DNS"
+echo "ALB primario: http://$PRIMARY_ALB"

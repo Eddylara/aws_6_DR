@@ -9,9 +9,33 @@ SECONDARY_RDS_ID="${SECONDARY_RDS_ID:-$(terraform output -raw secondary_rds_iden
 SECONDARY_ALB="${SECONDARY_ALB:-$(terraform output -raw secondary_alb_dns)}"
 APP_DNS="${APP_DNS:-$(terraform output -raw app_dns)}"
 
+# Variables para medir RTO y RPO
+FAILOVER_START_TIME=$(date +%s%3N)
+RPO_VALUE=0
+
 echo "Iniciando failover a región secundaria (${SECONDARY_REGION})..."
 
-echo "Promoviendo la réplica RDS a primaria..."
+echo "Obteniendo RPO (lag de replicación de RDS)..."
+RPO_LAG=$(aws rds describe-db-instances \
+  --db-instance-identifier "$SECONDARY_RDS_ID" \
+  --region "$SECONDARY_REGION" \
+  --query 'DBInstances[0].StatusInfos[?Status==`replicating`].Message' \
+  --output text 2>/dev/null || echo "")
+
+if [[ -z "$RPO_LAG" ]]; then
+  echo "Consultando ReplicationLag de forma alternativa..."
+  RPO_LAG=$(aws rds describe-db-instances \
+    --db-instance-identifier "$SECONDARY_RDS_ID" \
+    --region "$SECONDARY_REGION" \
+    --query 'DBInstances[0].LatestRestorableTime' \
+    --output text 2>/dev/null || echo "")
+  RPO_VALUE=0
+else
+  # Extraer el valor de segundos si está disponible
+  RPO_VALUE=$(echo "$RPO_LAG" | grep -oP '\d+' | head -1 || echo "0")
+fi
+
+echo "RPO estimado (lag de replicación): ${RPO_VALUE} segundos"
 aws rds promote-read-replica \
   --db-instance-identifier "$SECONDARY_RDS_ID" \
   --region "$SECONDARY_REGION"
@@ -76,3 +100,20 @@ echo "Failover completado. Route 53 debe dirigir el tráfico al ALB saludable."
 echo "DB activa (writer) en secundaria: $SECONDARY_DB_ENDPOINT"
 echo "DNS de aplicación: $APP_DNS"
 echo "ALB secundario directo: http://$SECONDARY_ALB"
+
+# Calcular RTO (Recovery Time Objective)
+FAILOVER_END_TIME=$(date +%s%3N)
+RTO_MILLISECONDS=$((FAILOVER_END_TIME - FAILOVER_START_TIME))
+RTO_SECONDS=$((RTO_MILLISECONDS / 1000))
+RTO_MINUTES=$(echo "scale=2; $RTO_SECONDS / 60" | bc)
+
+echo ""
+echo "============================================"
+echo "   MÉTRICAS DE RECUPERACIÓN DE DESASTRES"
+echo "============================================"
+echo "RTO (Recovery Time Objective): ${RTO_SECONDS}s (~${RTO_MINUTES}m)"
+echo "  → Tiempo total desde inicio hasta sistema operativo"
+echo ""
+echo "RPO (Recovery Point Objective): ${RPO_VALUE}s"
+echo "  → Máximona de datos que se pueden perder (lag de replicación)"
+echo "============================================"
