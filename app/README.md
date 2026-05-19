@@ -146,3 +146,8 @@ curl -X DELETE http://ALB/api/personas/1
 ## Nota
 
 La ruta `/` devuelve un mensaje JSON simple para evitar depender de HTML.
+
+Equipo de Trabajo: 
+- Eddy lara 
+- Sebastian ruiz 
+- David Pelaez 
